@@ -2,7 +2,7 @@ import pendulum
 
 from airflow.decorators import dag
 
-import kp_utils_raw as kpur
+import kp_pred_utils_raw as kpur
 import ace_utils_raw as aur
 
 
@@ -10,9 +10,9 @@ import ace_utils_raw as aur
     schedule="35 8 * * *",
     start_date=pendulum.datetime(2023, 8, 1, tz="UTC"),
     catchup=False,
-    tags=["kp_raw"]
+    tags=["kp_pred_raw"]
 )
-def getKp_taskraw():
+def getKp_pred_taskraw():
     # Get the start and en dates and the directory path
     # Retrieves the current day as start date and One as end date since
     # this is done in automatic mode
@@ -37,10 +37,10 @@ def getKp_taskraw():
     # passed_arguments_dict = kpur.save_passed_arguments_locally(passed_arguments_dict)
 
     passed_param_dict = kpur.prep_args()
-    passed_param_dict = kpur.getKp(passed_param_dict)
+    passed_param_dict = kpur.getKpPred(passed_param_dict)
     passed_param_dict = kpur.save_kp_data_locally(passed_param_dict)
     passed_param_dict = aur.get_bucket_name(passed_param_dict)
     passed_param_dict = kpur.upload_raw(passed_param_dict)
 
 
-getKp_taskraw()
+getKp_pred_taskraw()

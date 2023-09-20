@@ -1,106 +1,123 @@
 import json
 import os.path
-import urllib.request
+from urllib import request
 import pandas as pd
+import numpy as np
 import datetime as dtm
+import requests
 
 from airflow.decorators import task
 
 from google.cloud import storage
 
 
-def __checkdate__(starttime, endtime):
-    if starttime > endtime:
-        raise NameError("Error! Start time must be before or equal to end time")
-    return True
-
-
-def __checkIndex__(index):
-    if index not in ['Kp', 'ap', 'Ap', 'Cp', 'C9', 'Hp30', 'Hp60', 'ap30', 'ap60', 'SN', 'Fobs', 'Fadj']:
-        raise IndexError(
-            "Error! Wrong index parameter!"
-            "\nAllowed are only the string parameter:"
-            "'Kp', 'ap', 'Ap', 'Cp', 'C9', 'Hp30', 'Hp60', 'ap30', 'ap60', 'SN', 'Fobs', 'Fadj'"
-        )
-    return True
-
-
-def __checkstatus__(status):
-    if status not in ['all', 'def']:
-        raise IndexError("Error! Wrong option parameter! \nAllowed are only the string parameter: 'def'")
-    return True
-
-
-def __addstatus__(url, status):
-    if status == 'def':
-        url = url + '&status=def'
-    return url
-
-
-def getKpindex(starttime, endtime, index, status='all'):
+def is_url(url):
     """
-    ---------------------------------------------------------------------------------
-    download 'Kp', 'ap', 'Ap', 'Cp', 'C9', 'Hp30', 'Hp60', 'ap30', 'ap60', 'SN', 'Fobs' or 'Fadj'
-    index data from kp.gfz-potsdam.de
-    date format for starttime and endtime is 'yyyy-mm-dd' or 'yyyy-mm-ddTHH:MM:SSZ'
-    optional 'def' parameter to get only definitive values
-    (only available for 'Kp', 'ap', 'Ap', 'Cp', 'C9', 'SN')
-    Hpo index and Fobs/Fadj does not have the status info
-    example: (time, index, status) = getKpindex('2021-09-29', '2021-10-01','Ap','def')
-    example: (time, index, status) = getKpindex('2021-09-29T12:00:00Z', '2021-10-01T12:00:00Z','Kp')
-    ---------------------------------------------------------------------------------
+    Check if the passed url exists or not
+
+    Parameters
+    ----------
+    url : string
+        URL to test.
+
+    Return
+    -------
+    True if the url exists, False if not
     """
-    result_t = 0
-    result_index = 0
-    result_s = 0
 
-    if len(starttime) == 10 and len(endtime) == 10:
-        starttime = starttime + 'T00:00:00Z'
-        endtime = endtime + 'T23:59:00Z'
+    r = requests.get(url)
+    if r.status_code == 429:
+        print('Retry URL checking (429)')
+        time.sleep(5)
+        return is_url(url)
+    elif r.status_code == 404:
+        return False
+    else:
+        return True
 
-    try:
-        d1 = dtm.datetime.strptime(starttime, '%Y-%m-%dT%H:%M:%SZ')
-        d2 = dtm.datetime.strptime(endtime, '%Y-%m-%dT%H:%M:%SZ')
 
-        __checkdate__(d1, d2)
-        __checkIndex__(index)
-        __checkstatus__(status)
+@task
+def getKpPred(passed_param_dict: dict):
+    """
+    Download Kp prediction over 3 days according a time_format.
+    Sources : https://services.swpc.noaa.gov/text/3-day-forecast.txt
+    The Kp prediction data in the file are presented like this :
+                 Feb 17       Feb 18       Feb 19
+    00-03UT       1.67         6.00 (G2)    3.33
+    03-06UT       3.00         5.33 (G1)    2.33
+    06-09UT       2.00         4.00         4.00
+    09-12UT       1.33         3.33         4.00
+    12-15UT       2.00         3.00         3.33
+    15-18UT       2.67         2.33         1.67
+    18-21UT       3.67         3.00         1.67
+    21-00UT       5.00 (G1)    3.67         2.67
 
-        time_string =\
-            "start=" +\
-            d1.strftime('%Y-%m-%dT%H:%M:%SZ') +\
-            "&end=" +\
-            d2.strftime('%Y-%m-%dT%H:%M:%SZ')
+    Parameters
+    ----------
+    passed_param_dict a dict
+    Return
+    -------
+    dataframe containing the Kp prediction over 3 days.
+    """
+    print('Get Kp prediction over 3 days...')
 
-        url = 'https://kp.gfz-potsdam.de/app/json/?' + time_string + "&index=" + index
-        if index not in ['Hp30', 'Hp60', 'ap30', 'ap60', 'Fobs', 'Fadj']:
-            url = __addstatus__(url, status)
+    # Check if the url of the file exists
+    url = 'https://services.swpc.noaa.gov/text/3-day-forecast.txt'
+    check_url = is_url(url)
 
-        web_url = urllib.request.urlopen(url)
-        binary = web_url.read()
-        text = binary.decode('utf-8')
+    if check_url:
+        # Open the file
+        file = request.urlopen(url)
+        data = pd.read_fwf(file)
+    else:
+        print("The url doesn't work anymore. (" + url + ")")
+        exit()
 
-        try:
-            data = json.loads(text)
-            result_t = tuple(data["datetime"])
-            result_index = tuple(data[index])
-            if index not in ['Hp30', 'Hp60', 'ap30', 'ap60', 'Fobs', 'Fadj']:
-                result_s = tuple(data["status"])
-        except Exception:
-            print(text)
+    # Skiprows : remove the first useless rows of the file
+    ind = 0
+    while data.iloc[ind, 0][0] != '0':
+        ind += 1
+    data.drop(range(ind-1), axis=0, inplace=True)
+    data.reset_index(inplace=True, drop=True)
 
-    except NameError as er:
-        print(er)
-    except IndexError as er:
-        print(er)
-    except ValueError:
-        print("Error! Wrong datetime string")
-        print("Both dates must be the same format.")
-        print("Datetime strings must be in format yyyy-mm-dd or yyyy-mm-ddTHH:MM:SSZ")
-    except urllib.error.URLError:
-        print("Connection Error\nCan not reach " + url)
-    finally:
-        return result_t, result_index, result_s
+    # Skipfooter : remove the last useless rows of file
+    data.drop(range(9, data.index[-1]+1), axis=0, inplace=True)
+
+    # Only keep the first column of the file
+    data = pd.DataFrame(data.values[1:, 0], columns=[data.values[0, 0]])
+
+    # Get the 3 dates of the Kp prediction in a list
+    cols = data.columns[0].split()
+    current_dates = [cols[i] + ' ' + cols[i + 1] for i in np.arange(0, 6, 2)]
+
+    # Loop every line of the data (should be every 3h => 8 times)
+    Kp_pred = pd.Series()
+    for i in range(len(data.values)):
+        current_line = data.iloc[i, 0].split()
+
+        k = 0
+        # Remove the label of Kp tempest if there is one ((G1), (G2), etc.)
+        while k < len(current_line):
+            if current_line[k][0] == '(':
+                del current_line[k]
+                k -= 1
+            k += 1
+
+        current_hour = int(current_line[0][:2])
+        for j in range(len(current_dates)):
+            current_day = dtm.datetime.strptime(current_dates[j], '%b %d')
+            current_date = dtm.date(year=dtm.datetime.today().year, month=current_day.month, day=current_day.day)
+            current_datetime = dtm.datetime(year=current_date.year, month=current_date.month, day=current_date.day, hour=current_hour, minute=0)
+            Kp_pred[current_datetime] = float(current_line[j+1])
+
+    # Sort the index because we read the file line per line and not column per column
+    Kp_pred.sort_index(inplace=True)
+    Kp_pred.index.rename('date', inplace=True)
+
+    Kp_pred.name = 'value'
+    Kp_pred = Kp_pred.to_frame()
+    passed_param_dict["Kp_pred"] = Kp_pred
+    return passed_param_dict
 
 
 @task()
@@ -109,7 +126,7 @@ def prep_args():
     passed_param_dict["hours_to_take"] = 24 * passed_param_dict["days_to_take"]
 
     passed_param_dict["raw_data_path"] =\
-        "/home/lorenzo/spaceable/airflow_kp_scraping/raw_data"
+        "/home/lorenzo/spaceable/airflow_kp_pred_scraping/raw_data"
 
     x = dtm.datetime.strftime(dtm.datetime.now(), '%Y%m%dT%H%M%SZ')
     raw_data_file = f"{x}_kp_raw_data.txt"
@@ -118,57 +135,9 @@ def prep_args():
     return passed_param_dict
 
 
-# %% DEFINING THE FUNCTION THAT GET KP DATA
-@task()
-def getKp(passed_param_dict: dict):
-    """
-    Download Kp index data according a number of hours to keep and a time_format.
-    Sources : kp.gfz-potsdam.de
-
-    Parameters
-    ----------
-    passed_param_dict : dict
-        A dict with a key called "hours_to_take":
-        The number of hours to scrape that will be display on the platform.
-
-    Return
-    -------
-    dataframe containing the good GOES data.
-
-    """
-
-    # days_to_take = passed_param_dict["days_to_take"]
-    hours_to_take = passed_param_dict["hours_to_take"]
-
-    print('Process Kp data (' + str(hours_to_take) + 'h data history)')
-    today = dtm.datetime.today() - dtm.timedelta(hours=2)  # We put a delay of 2 hours to match ACE data
-    date_to_scrape = today - dtm.timedelta(days=int(hours_to_take / 24))
-
-    kp_index, kp_data, _ = getKpindex(
-        str(date_to_scrape.date()) +
-        'T' +
-        str(date_to_scrape.time().hour) +
-        ':00:00Z',
-        str(today.date()) +
-        'T' +
-        str(today.time().hour) +
-        ':00:00Z', "Kp"
-    )
-
-    kp = pd.DataFrame([kp_index, kp_data])
-    kp = kp.transpose()
-    kp.columns = ['date', 'value']
-    kp['date'] = kp['date'].apply(
-        lambda df: dtm.datetime.strptime(df, '%Y-%m-%dT%H:%M:%SZ'))
-    kp.set_index('date', inplace=True, drop=True)
-
-    passed_param_dict["kp"] = kp
-    return passed_param_dict
-
-
 @task()
 def save_kp_data_locally(passed_param_dict: dict):
-    kp = passed_param_dict["kp"]
+    kp = passed_param_dict["Kp_pred"]
     x = os.path.join(
         passed_param_dict["raw_data_path"], passed_param_dict["raw_data_file"]
     )
